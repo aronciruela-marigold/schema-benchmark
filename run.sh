@@ -1,1 +1,1 @@
-docker run --network containers_sandbox aronciruela/schema-manager
+docker run --network containers_sandbox schema-manager

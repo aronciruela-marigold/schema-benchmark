@@ -1,2 +1,2 @@
-docker build -t aronciruela/schema-manager .
-docker run --network containers_sandbox aronciruela/schema-manager
+docker build -t schema-manager .
+docker run --network containers_sandbox schema-manager
