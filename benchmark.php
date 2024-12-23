@@ -4,15 +4,13 @@ require_once __DIR__ . '/vendor/autoload.php';
 
 use MongoDB\Client;
 use MongoDB\Driver\Command;
-use MongoDB\Driver\BulkWrite;
-use MongoDB\Database;
 
 $client = new Client("mongodb://mongo:27017");
 $database = null;
 
 try {
     $client->selectDatabase('admin')->command(['ping' => 1]);
-    echo "Pinged your deployment. You successfully connected to MongoDB!" . PHP_EOL;
+    echo "Pinged your deployment. You successfully connected to MongoDB!" . PHP_EOL . PHP_EOL;
 } catch (Exception $e) {
     printf($e->getMessage());
 }
@@ -37,76 +35,121 @@ $collections = [
     ]
 ];
 
+$database = $client->selectDatabase('test_db_benchmark');
+
 foreach ($collections as $collection => $options) {
     echo "Creating collection $collection" . PHP_EOL;
-    $command = new Command(array_merge([
-        'create' => $collection
-    ], $options));
+    $commandCreateCollection = new Command(array_merge(['create' => $collection], $options));
 
     try {
-        $database = $client->selectDatabase('test_db_benchmark');
-        $database->command($command);
+        $database->command($commandCreateCollection);
+
+        echo "Creating indexes $collection" . PHP_EOL . PHP_EOL;
+        $collection = $database->selectCollection($collection);
+        $collection->createIndexes([
+            ['key' => ['username' => 1]],
+            ['key' => ['email' => 1]]
+        ]);
+
     } catch (MongoDB\Driver\Exception\Exception $e) {
-        printf($e->getMessage());
         echo "ERROR! $e" . PHP_EOL;
     }
 }
 
-function benchmarkCollections(Database $database, $collection, $numDocs) {
-    $startTime = microtime(true);
+$numDocs = $argv[1] == null ? 1000 : $argv[1];
+$iterations = $argv[2] == null ? 3 : $argv[2];;
 
-    $startWriteTime = microtime(true);
-    for ($i = 0; $i < $numDocs; $i++) {
-        $insert = new Command([
-            'insert' => $collection,
-            'documents' => [
-                [
-                    'name' => "User {$i}",
-                    'email' => "user{$i}@example.com"
-                ]
-            ]
-        ]);
-        $database->command($insert);
+$latencies = [];
+$results = [];
+
+echo "Running CRUD benchmark with $numDocs Documents in $iterations Iterations" . PHP_EOL;
+
+for ($i = 1; $i <= $iterations; $i++) {
+    echo "# ITERATION $i" .  PHP_EOL;
+    $results["iteration-{$i}"] = [];
+
+    foreach (array_keys($collections) as $collection) {
+        echo "## For collection $collection" . PHP_EOL;
+        $startTime = microtime(true);
+
+        $insertStartTime = microtime(true);
+        for ($x = 0; $x < $numDocs; $x++) {
+            $database->selectCollection($collection)->insertOne([
+                'name' => "User {$x}",
+                'email' => "user{$x}@example.com"
+            ]);
+        }
+        $insertEndTime = microtime(true);
+        $totalExecTime = $insertEndTime - $insertStartTime;
+        echo "### Insert Exec Time: " . number_format($totalExecTime, 2) . 's' . PHP_EOL;
+
+        $findStartTime = microtime(true);
+        for ($x = 0; $x < $numDocs; $x++) {
+            $database->selectCollection($collection)->findOne(['name' => "User {$x}"]);
+        }
+        $findEndTime = microtime(true);
+        $totalExecTime = $findEndTime - $findStartTime;
+        echo "### Find Exec Time: " . number_format($totalExecTime, 2) . 's' . PHP_EOL;
+
+        $updateStartTime = microtime(true);
+        for ($x = 0; $x < $numDocs; $x++) {
+            $database->selectCollection($collection)->updateOne(
+                ['name' => "User {$x}"],
+                ['$set' => ['email' => "updated{$x}@example.com"]]
+            );
+        }
+        $updateEndTime = microtime(true);
+        $totalExecTime = $updateEndTime - $updateStartTime;
+        echo "### Update Exec Time: " . number_format($totalExecTime, 2) . 's' . PHP_EOL;
+
+        $deleteStartTime = microtime(true);
+        for ($x = 0; $x < $numDocs; $x++) {
+            $database->selectCollection($collection)->deleteOne(['name' => "User {$x}"]);
+        }
+        $deleteEndTime = microtime(true);
+        $totalExecTime = $deleteEndTime - $deleteStartTime;
+        echo "### Delete Exec Time: " . number_format($totalExecTime, 2) . 's' . PHP_EOL;
+
+        $endTime = microtime(true);
+        $totalExecTime = $endTime - $startTime;
+        $results["iteration-{$i}"][$collection] = $totalExecTime;
+        echo "### Execution Time: " . number_format($totalExecTime, 2) . 's' . PHP_EOL . PHP_EOL;
     }
-    $endWriteTime = microtime(true);
-    $writeLatency = $endWriteTime - $startWriteTime;
-    echo "Collection: $collection Documents inserted: $i write time latency: " . number_format($writeLatency, 4) . PHP_EOL;
 
-    $startUpdateTime = microtime(true);
-    for ($i = 0; $i < $numDocs; $i++) {
-        $update = new Command([
-            'update' => $collection,
-            'updates' => [
-                [
-                    'q' => ['name' => "User {$i}"],
-                    'u' => ['$set' => ['email' => "updated{$i}@example.com"]],
-                    'upsert' => false
-                ]
-            ]
-        ]);
-        $database->command($update);
-    }
-    $endUpdateTime = microtime(true);
-    $updateLatency = $endUpdateTime - $startUpdateTime;
-    echo "Collection: $collection Documents updated: $i update time latency: " . number_format($updateLatency, 4) . PHP_EOL;
-
-    $endTime = microtime(true);
-
-    return $endTime - $startTime;
+    $collections = array_reverse($collections);
 }
 
-$numDocs = 10000;
-$latencies = [];
+echo "# TOTAL in $iterations ITERATIONS" . PHP_EOL;
+
+$collectionResult = [];
 
 foreach (array_keys($collections) as $collection) {
-    echo "running bechmark for collection $collection ============>" . PHP_EOL;
-    $latencies[$collection] = benchmarkCollections($database, $collection, $numDocs);
+    $collectionResult[$collection] = [];
+
+    foreach ($results as $iterations) {
+        foreach ($iterations as $coll => $latency) {
+            if($collection == $coll) {
+                array_push($collectionResult[$collection], $latency);
+            }
+        }
+    }
 }
 
-echo '--------------------------' . PHP_EOL;
+foreach ($collectionResult as $coll => $latencies) {
+    echo "## Collection $coll" . PHP_EOL;
+    $totalLatencies = array_sum($latencies);
+    $mean = $totalLatencies / count($latencies);
 
-foreach ($latencies as $collection => $latency) {
-    echo "Collection: $collection, total latency: " . number_format($latency, 4) . " seconds" . PHP_EOL;
+    $variance = 0.0;
+    foreach($latencies as $latency) {
+        $variance += pow(($latency - $mean), 2);
+    }
+    $standardDeviation = (float)sqrt( $variance /count($latencies));
+
+    echo "### Total execution time " . number_format($totalLatencies, 2) . 's' . PHP_EOL;
+    echo "### Average " . number_format($mean, 2) . 's' . PHP_EOL;
+    echo "### Standard Deviation " . number_format($standardDeviation, 2) . 's' . PHP_EOL;
+    echo PHP_EOL;
 }
 
 $database->drop();
